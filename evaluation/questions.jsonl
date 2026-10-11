@@ -1,0 +1,22 @@
+{"id":"q01","question":"AtlasDocs 最低需要哪个 Python 版本？","sources":["README.md"],"answer_terms":["3.11"]}
+{"id":"q02","question":"启动网页的命令是什么？","sources":["README.md"],"answer_terms":["streamlit","app.py"]}
+{"id":"q03","question":"默认端口和监听地址是什么？","sources":["README.md"],"answer_terms":["8501","127.0.0.1"]}
+{"id":"q04","question":"能直接导入扫描 PDF 吗？","sources":["README.md"],"answer_terms":["OCR"]}
+{"id":"q05","question":"单个文档最大能上传多大？","sources":["README.md"],"answer_terms":["20","MB"]}
+{"id":"q06","question":"LLM_API_KEY 配置在哪里，环境变量与文件谁优先？","sources":["configuration.md"],"answer_terms":[".env","环境变量"]}
+{"id":"q07","question":"EMBEDDING_PROVIDER=openai 需要哪些配置？","sources":["configuration.md"],"answer_terms":["EMBEDDING_API_KEY","EMBEDDING_BASE_URL","EMBEDDING_MODEL"]}
+{"id":"q08","question":"CHUNK_SIZE 和 CHUNK_OVERLAP 默认值是多少？","sources":["configuration.md"],"answer_terms":["800","120"]}
+{"id":"q09","question":"TOP_K 默认多少？","sources":["configuration.md"],"answer_terms":["5"]}
+{"id":"q10","question":"RRF 分数是概率吗，融合公式是什么？","sources":["retrieval.md"],"answer_terms":["60","rank"]}
+{"id":"q11","question":"为什么精确配置名适合 BM25 检索？","sources":["retrieval.md"],"answer_terms":["关键词"]}
+{"id":"q12","question":"PDF 和 Markdown 引用位置如何表示？","sources":["retrieval.md"],"answer_terms":["页","行"]}
+{"id":"q13","question":"文档没改时会重复做向量化吗，怎么判断变化？","sources":["storage.md"],"answer_terms":["SHA-256"]}
+{"id":"q14","question":"Embedding 接口失败时会损坏旧索引吗？","sources":["storage.md"],"answer_terms":["保留"]}
+{"id":"q15","question":"删除源文件后如何清理检索中的旧内容？","sources":["storage.md"],"answer_terms":["同步"]}
+{"id":"q16","question":"更换向量模型和分块参数后怎么办？","sources":["configuration.md","storage.md"],"answer_terms":["重建"]}
+{"id":"q17","question":"遇到 401 如何检查？","sources":["troubleshooting.md"],"answer_terms":["Key","环境变量"]}
+{"id":"q18","question":"并发更新知识库时如何避免写冲突？","sources":["storage.md"],"answer_terms":["文件锁"]}
+{"id":"q19","question":"作者的个人电话号码是多少？","sources":[],"answer_terms":[]}
+{"id":"q20","question":"AtlasDocs 公司今年营业收入是多少？","sources":[],"answer_terms":[]}
+{"id":"q21","question":"AtlasDocs 的软件著作权登记号是多少？","sources":[],"answer_terms":[]}
+{"id":"q22","question":"这个系统在 A100 上每秒能处理多少请求？","sources":[],"answer_terms":[]}

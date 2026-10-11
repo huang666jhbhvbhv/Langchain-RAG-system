@@ -1,0 +1,1076 @@
+% !TEX program = xelatex
+% UTF-8. Compile twice with XeLaTeX for the table of contents.
+% Standalone document: no external figures, code files, or shell-escape needed.
+\documentclass[UTF8,11pt,a4paper,fontset=fandol]{ctexart}
+\usepackage[margin=2.1cm,headheight=15pt]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{array,booktabs,longtable}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{fvextra}
+\usepackage{fancyhdr}
+\usepackage{xurl}
+\usepackage[unicode,colorlinks=true,linkcolor=teal,urlcolor=teal,bookmarksnumbered=true]{hyperref}
+\definecolor{CodeGray}{RGB}{245,247,249}
+\DefineVerbatimEnvironment{Code}{Verbatim}{fontsize=\small,breaklines=true,breakanywhere=true,frame=single,framesep=5pt,rulecolor=\color{gray},tabsize=4}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcommand{\important}[1]{\par\smallskip\noindent\textbf{记住：}#1\par\smallskip}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\setlist{itemsep=3pt,topsep=5pt}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{4pt}
+\setlength{\emergencystretch}{3em}
+\renewcommand{\arraystretch}{1.2}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small Project Docs RAG 零基础阅读手册}
+\fancyhead[R]{\small 原理 · 代码 · 使用}
+\fancyfoot[C]{\thepage}
+\hypersetup{pdftitle={项目文档 RAG 系统：从零理解原理、代码与使用},pdfauthor={项目学习笔记}}
+
+\begin{document}
+\begin{titlepage}
+\centering
+\vspace*{2cm}
+{\Huge\bfseries 项目文档 RAG 系统\par}
+\vspace{0.6cm}
+{\LARGE 从零理解原理、代码与使用\par}
+\vspace{1cm}
+{\large 基于 LangChain、DeepSeek、SQLite 与 Streamlit\par}
+\vspace{1.2cm}
+\begin{minipage}{0.9\textwidth}
+本手册对应你电脑中的 \code{project-docs-rag} 项目。假设读者还不知道 RAG、Embedding、向量检索与 LangChain 是什么，先从具体问题出发，再逐步解释网页与代码。
+
+阅读后，你应该能回答四个问题：文档怎样变成可搜索的数据？用户提问后程序做了什么？哪些步骤调用了模型？怎样判断系统真的有效？
+
+代码摘录来自当前实现；为便于理解，有些片段省略了周围的异常处理。标为“教学示意”的代码用于解释原理，不表示项目源码逐字如此。
+\end{minipage}
+\vfill
+{\large 对照版本：2026 年 10 月 10 日\par}
+\vspace{0.5cm}
+\begin{minipage}{0.9\textwidth}
+\small
+项目目录：\path{E:/code_learning/learn-cc/langchain-RAG/project-docs-rag}
+
+编译：使用 XeLaTeX，连续编译两次生成目录。使用 TeX Live 自带 Fandol 字体；不依赖照片、外部代码文件或 shell-escape。Overleaf 中选择 XeLaTeX 编译器即可。
+\end{minipage}
+\end{titlepage}
+
+\tableofcontents
+\clearpage
+
+\section{先认识这个项目：它到底能帮你做什么}
+
+\subsection{一个贯穿全文的例子}
+假设你有一份项目说明，其中写着：
+\begin{Code}
+# Configuration
+LLM_API_KEY is configured in the application .env file.
+The default web port is 8501.
+\end{Code}
+现在你问：“API Key 应该放在哪里？”
+
+如果直接问一个没有读过这份说明的大模型，它只能根据一般经验猜测。不同项目可能使用不同配置方式，通用知识未必适用于你的代码。
+
+本项目先在文档库里找到相关段落，再把“问题＋找到的原文”一起发给模型。模型据此回答：“在应用目录的 \code{.env} 文件中配置。[1]”网页同时展示编号 [1] 对应的来源。
+
+这里有两种不同的产物：\textbf{检索结果}是程序找到的原文；\textbf{生成答案}是模型根据原文整理出的回答。离线演示只展示前者。
+
+\subsection{和你之前的编程 Agent 有什么区别}
+\begin{longtable}{L{0.22\textwidth}L{0.32\textwidth}L{0.34\textwidth}}
+\toprule
+比较项 & 编程 Agent & 本项目文档 RAG \\
+\midrule
+主要目标 & 修改文件、运行测试、完成开发任务 & 从资料中查证信息并回答问题 \\
+典型流程 & 模型决定工具调用，执行结果继续回传 & 按既定流程检索、整理上下文、生成答案 \\
+对项目的操作 & 可以在审批后改代码、执行 Shell & 导入文档和更新自己的索引，不通过模型执行任意 Shell \\
+核心难点 & 工具可靠性、权限、循环与任务状态 & 资料解析、召回、证据是否足够、答案是否忠于原文 \\
+\bottomrule
+\end{longtable}
+这个 RAG 系统没有无限工具循环。它主要是一条预先编排好的处理流程，不能因为使用了大模型就把它等同于自主 Agent。
+
+\section{RAG 的基础原理}
+
+\subsection{R、A、G 分别是什么意思}
+RAG 是 Retrieval-Augmented Generation，即“检索增强生成”。
+\begin{enumerate}
+\item \textbf{Retrieval，检索：}从你的资料中找到可能回答问题的片段。
+\item \textbf{Augmented，增强：}把这些片段加入模型本次请求的上下文。
+\item \textbf{Generation，生成：}让模型依据这些材料组织回答。
+\end{enumerate}
+
+可以把大模型想成一位有通用知识的答题者，把知识库想成开卷考试的资料。程序先帮它翻到相关页，再请它作答。找错页会影响答案；翻到了正确页，也不能保证答题者一定理解正确。
+
+\important{RAG 通常不修改大模型参数，也不是把文档永久训练进模型。每次问答时，程序把检索到的资料临时放进请求。}
+
+\subsection{为什么不把所有文件一次性都发给模型}
+少量短文档可以直接全部提供，不必为了使用 RAG 而强行建库。但文档增多后，会遇到上下文长度、调用费用、延迟，以及无关信息干扰等问题。RAG 的意义是先缩小材料范围。
+
+RAG 也有代价：检索可能遗漏关键段落；分块不合适可能打断上下文；文档过时，答案就可能过时。因此“用了 RAG”不等于“不会产生幻觉”。
+
+\subsection{必须分清楚两条流程}
+\begin{center}
+\begin{tabular}{L{0.17\textwidth}L{0.7\textwidth}}
+\toprule
+阶段 & 处理顺序 \\
+\midrule
+建库/同步 & 文档扫描 $\rightarrow$ 文本解析 $\rightarrow$ 分块 $\rightarrow$ 向量化 $\rightarrow$ 保存原文、来源和向量 \\
+提问/回答 & 问题 $\rightarrow$ 检索片段 $\rightarrow$ 控制上下文长度 $\rightarrow$ 模型回答 $\rightarrow$ 检查引用并展示 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+建库不是每问一句都做。一般在首次导入或文档发生变化后做。提问时复用已建立的索引，问题本身可能需要单独向量化。
+
+\subsection{新手需要认识的几个名词}
+\begin{longtable}{L{0.23\textwidth}L{0.65\textwidth}}
+\toprule
+名词 & 在本项目中的意思 \\
+\midrule
+Document & 一段文本，加上来源等附加信息的对象 \\
+Chunk & 从较长文档中切出来的一小段文本 \\
+Metadata & 来源文件、页码、行号、片段编号等附加信息 \\
+Embedding & 将文本映射为一组数值，便于比较相似程度 \\
+Index & 为检索准备并保存的数据；本项目还用这个名字表示管理索引的 Python 类 \\
+Retriever & 检索器，接收问题并找出候选片段 \\
+Top-K & 最多取排名前 K 个结果；不足 K 个时不会凭空补齐 \\
+Context & 本次交给模型的参考资料等上下文 \\
+Prompt & 给模型的任务说明、约束和消息模板 \\
+Token & 模型处理文本时使用的单位，不严格等于字符或汉字 \\
+\bottomrule
+\end{longtable}
+
+\section{先把网页用起来}
+
+\subsection{网页不是一个已经部署在网上的网站}
+浏览器负责显示界面，电脑里的 Python 服务负责读取文件、检索和调用模型。两者需要通过本机地址通信。
+
+\code{127.0.0.1} 表示你的电脑，\code{8501} 是服务使用的端口。\code{localhost} 通常也指本机。“离线”不代表可以不用启动服务，而是演示流程不需要联网调用模型。
+
+在 VS Code 顶部选择“终端 $\rightarrow$ 新建终端”，在 PowerShell 输入：
+\begin{Code}
+cd E:\code_learning\learn-cc\langchain-RAG\project-docs-rag
+.\start.cmd
+\end{Code}
+程序成功启动后，终端自动打印：
+\begin{Code}
+You can now view your Streamlit app in your browser.
+URL: http://127.0.0.1:8501
+\end{Code}
+这段提示不是要你输入的命令。打开浏览器，在地址栏输入 \url{http://127.0.0.1:8501}。正常由自己启动时，应保持终端运行；按 Ctrl+C 可以停止服务。
+
+\subsection{启动脚本做了什么}
+\code{start.cmd} 的关键部分如下：
+\begin{Code}
+@echo off
+chcp 65001 >nul
+cd /d "%~dp0"
+if not exist ".venv\Scripts\python.exe" (
+  echo Please run setup.cmd first.
+  pause
+  exit /b 1
+)
+".venv\Scripts\python.exe" -m streamlit run app.py
+pause
+\end{Code}
+\begin{itemize}
+\item \code{chcp 65001} 设置终端编码为 UTF-8，减少中文乱码。
+\item \verb|cd /d "%~dp0"| 切换到脚本所在目录，不依赖你原来在哪个文件夹。
+\item \code{.venv} 是项目独立 Python 环境，避免与其他项目的依赖冲突。
+\item \code{-m streamlit run app.py} 让 Streamlit 执行网页入口。
+\item 最后的 \code{pause} 让脚本退出后保留窗口，便于看到错误信息。
+\end{itemize}
+在编辑器里打开这个文件只是阅读它，必须运行脚本才会启动服务。
+
+\subsection{第一次体验的最短路线}
+\begin{enumerate}
+\item 打开网页，保持“离线演示”开关开启。
+\item 知识库名称保留 \code{default}，文档目录保留默认 \code{sample_docs}。
+\item 点击“同步 / 更新索引”，等待显示文件数与片段数。
+\item 输入“LLM\_API\_KEY 在哪里配置？”并提交。
+\item 查看检索原文，展开来源，核对内容是否真的有关。
+\end{enumerate}
+\code{sample_docs} 中是为学习准备的虚构 AtlasDocs 项目说明。它们不是自动生成的你电脑上所有项目的真实文档；测试答案只对相应示例资料负责。
+
+\section{网页每一个区域和按钮的作用}
+
+\subsection{左侧：知识库和数据管理}
+\begin{longtable}{L{0.28\textwidth}L{0.60\textwidth}}
+\toprule
+界面项目 & 作用、操作和注意事项 \\
+\midrule
+离线演示 & 开启时使用哈希向量并展示原文，不调用聊天模型。关闭后使用配置中的真实 Embedding 和聊天模型。两种模式的索引分开保存。 \\
+知识库名称 & 标识一套独立索引。例如 \code{default}、\code{agent_docs}。支持英文、数字、下划线和连字符；不是文档文件名。 \\
+文档目录 & 程序实际扫描和读取的文件夹。可以填绝对路径；换成另一个项目目录时，应使用新的知识库名称。 \\
+导入 MD/TXT/PDF & 在浏览器中选择待上传的文件。仅选中文件还没有完成入库。 \\
+允许覆盖同名文件 & 默认为关闭，防止上传文件直接替换目录中已有资料。勾选后允许覆盖原文，不是只覆盖索引。 \\
+保存上传文件到文档目录 & 将已选文件真正保存到左侧指定目录。随后还需要点击同步索引。 \\
+完整重建 & 忽略旧文件哈希，对当前目录中的全部文档重新解析、向量化。更换 Embedding 模型或分块参数时使用。 \\
+同步 / 更新索引 & 扫描当前目录，处理新增和修改文档，移除已删除源文件对应的索引。普通同步复用未变化文件。 \\
+文件/片段/版本 & 显示已入库文件数、文本片段数和索引版本。一个文件可能对应多个片段；空白文件也可能没有片段。 \\
+\bottomrule
+\end{longtable}
+
+\important{“上传文件”“保存文件”“建立索引”是不同的动作。已有文件位于正确目录时，不必再上传，直接同步即可。}
+
+\subsection{左侧：问答行为控制}
+\begin{longtable}{L{0.28\textwidth}L{0.60\textwidth}}
+\toprule
+界面项目 & 作用、操作和注意事项 \\
+\midrule
+混合检索 & 同时使用向量相似度和 BM25，按照两路排名融合结果。一般可先用它。 \\
+向量检索 & 依据文本向量相似度找资料。正式模式依赖语义模型；演示模式只有词法哈希向量，不代表语义理解能力。 \\
+关键词检索 & 依赖文本词项匹配和 BM25 排序，适合配置名、错误码等精确标识。查询时不调用 Embedding，但当前统一建库流程仍会生成文档向量。 \\
+只看检索结果 & 跳过聊天模型，只展示候选原文。正式模式若选向量或混合检索，仍可能调用远程 Embedding，因此不一定完全离线、免费。 \\
+使用最近对话理解追问 & 正式模式下可开启。额外调用一次模型，把“它默认多少？”改写成明确问题。演示模式禁用。 \\
+清空聊天 & 删除当前页面会话中的聊天记录，不删除知识库原文或索引。 \\
+\bottomrule
+\end{longtable}
+
+\subsection{右侧：问题、回答与证据}
+底部输入框接收自然语言问题。回答下方的来源折叠面板可展开查看原文，不要只看生成的答案。
+
+\begin{itemize}
+\item Markdown/TXT 显示源文件与起止行号；PDF 优先显示页码。
+\item \code{cosine} 是向量余弦相似度；\code{BM25} 是词项相关性分数；\code{RRF} 是融合排名分数。
+\item 三种分数不在同一个尺度，不能直接加起来理解成“可信概率”。未运行的检索通道可能显示 0。
+\item 生成答案引用的是选中的证据编号；折叠面板可能展示提供给模型的全部来源，其中部分并未被答案实际引用。
+\item 用时和 Token 统计用于观察开销，Token 统计不包含远程 Embedding 费用。
+\item “导出本轮聊天与引用 JSON”保存当前会话的问题、答案与来源，方便复盘。不要把它误认为自动长期聊天存储。
+\end{itemize}
+
+\subsection{各种状态是什么意思}
+\begin{longtable}{L{0.25\textwidth}L{0.63\textwidth}}
+\toprule
+状态 & 含义 \\
+\midrule
+\code{demo} & 离线演示，仅展示检索原文，未调用回答模型。 \\
+\code{retrieved} & 选择了“只看检索结果”，未生成答案。 \\
+\code{no_evidence} & 没有获得可放入上下文的足够候选证据，直接提示缺少资料。 \\
+\code{answered} & 模型给出答案，程序的引用格式检查通过；不等于事实已被独立证明。 \\
+\code{abstained} & 有检索片段，但模型判断不足以回答，返回拒答说明。 \\
+\code{invalid_answer} & 模型输出格式、引用或完整性有问题，本次生成内容未作为正常答案采用。 \\
+\bottomrule
+\end{longtable}
+
+\section{项目地图：先看哪些文件}
+\begin{Code}
+project-docs-rag/
+  app.py
+  start.cmd
+  setup.cmd
+  .env.example
+  .streamlit/config.toml
+  rag/
+    config.py
+    ingest.py
+    embedding.py
+    store.py
+    retrieve.py
+    answer.py
+    cli.py
+    evaluate.py
+  sample_docs/
+  evaluation/questions.jsonl
+  tests/
+  .rag-data/                  # runtime data
+\end{Code}
+
+\begin{longtable}{L{0.26\textwidth}L{0.62\textwidth}}
+\toprule
+文件 & 可以带着哪个问题去读 \\
+\midrule
+\code{app.py} & 点击按钮或输入问题后，程序调用了谁？ \\
+\code{rag/config.py} & 参数从哪里来？演示和正式模式如何切换？ \\
+\code{rag/ingest.py} & 文档如何变成文本片段？来源怎样记录？ \\
+\code{rag/embedding.py} & 文本如何变向量？三种后端有何区别？ \\
+\code{rag/store.py} & 文件、片段和向量怎样保存和更新？ \\
+\code{rag/retrieve.py} & 给定一个问题，怎样找到相关片段？ \\
+\code{rag/answer.py} & 哪些材料发给模型？如何校验回答？ \\
+\code{rag/cli.py} & 不用网页时，怎样在终端调用系统？ \\
+\code{rag/evaluate.py} & 如何比较三种检索方式，而不靠感觉？ \\
+\bottomrule
+\end{longtable}
+推荐阅读顺序是先了解 \code{app.py} 的按钮入口，再看 \code{answer.py} 的问答主线，然后补齐 ingest、embedding、store 和 retrieve 的细节。
+
+\section{配置模块：Config 到底是什么}
+
+\subsection{把分散的参数装进一个对象}
+\code{Config} 是一个 Python 数据类，可以理解为“设置清单”。例如：
+\begin{Code}
+@dataclass
+class Config:
+    provider: str = "local"
+    chunk_size: int = 800
+    overlap: int = 120
+    top_k: int = 5
+    context_chars: int = 10000
+    min_cosine: float = 0.25
+    min_bm25: float = 0.1
+    demo: bool = False
+\end{Code}
+\code{config.top_k} 就是从这个设置清单里取出“最多检索多少段”。有了统一配置，不必在各个文件中分别写死数字。
+
+\subsection{.env 的加载方式}
+\begin{Code}
+load_dotenv(APP / ".env", override=False)
+provider = "demo" if demo else os.getenv("EMBEDDING_PROVIDER", "local")
+\end{Code}
+\code{APP} 是应用根目录。\code{load_dotenv} 将配置文件中的设置加载到进程环境；\code{override=False} 表示已有环境变量优先。
+
+这也解释了两个现象：如果电脑环境变量中已经设置了旧 Key，修改文件不一定覆盖它；进程读过配置后，修改 \code{.env} 应重启应用，不应假设网页刷新一定载入新值。
+
+\subsection{常用参数的取舍}
+\begin{longtable}{L{0.26\textwidth}L{0.12\textwidth}L{0.48\textwidth}}
+\toprule
+参数 & 默认值 & 调整时怎样理解 \\
+\midrule
+\code{CHUNK_SIZE} & 800 & 按字符切分；太大可能噪声多或被 Embedding 模型截断，太小可能语义不完整。 \\
+\code{CHUNK_OVERLAP} & 120 & 相邻片段的重叠目标；不是所有边界都严格重叠 120 字符。越大通常越重复。 \\
+\code{TOP_K} & 5 & 最多保留的检索片段数。增大可扩大召回，也可能引入无关信息。 \\
+\code{CONTEXT_CHARS} & 10000 & 控制传给模型的参考材料规模，是近似字符预算，不是精确 Token 数。 \\
+\code{MIN_COSINE} & 0.25 & 向量候选相关性门槛。必须结合实际 Embedding 校准，不能当通用置信度。 \\
+\code{MIN_BM25} & 0.1 & 关键词候选门槛；通用词也可能让无答案问题命中。 \\
+\code{LLM_MAX_TOKENS} & 2048 & 单次回答的输出长度限制，不是整个程序累计预算。 \\
+\code{LLM_TIMEOUT} & 90 & 请求超时秒数；有限重试可能让总等待更久。 \\
+\bottomrule
+\end{longtable}
+
+\section{文档解析与分块：ingest.py}
+
+\subsection{第一步，找到允许处理的文件}
+\code{scan(root)} 遍历文档目录，接收 \code{.md}、\code{.txt}、\code{.pdf}。它跳过隐藏目录、虚拟环境、Git 目录和符号链接等，避免把无关文件大量入库。
+
+\code{read_bytes(path)} 读取最多限制值加一个字节，以判断文件是否超限。当前单文件上限为 20 MB；每次扫描最多 2000 个文档，PDF 最多 500 页。
+
+\subsection{第二步，把不同文件格式统一成文本}
+普通文本文件使用：
+\begin{Code}
+text = data.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
+\end{Code}
+\code{utf-8-sig} 能处理 UTF-8 文件可能携带的 BOM；换行统一后，后面的字符位置和行号更容易计算。若文件是 GBK 编码，应先转成 UTF-8。
+
+PDF 使用 \code{pypdf.PdfReader}，逐页调用 \code{extract_text()}。本项目没有 OCR：一张扫描图片即使保存为 PDF，也不一定能直接提取出文字。PDF 中的复杂表格、分栏可能改变提取顺序。
+
+\subsection{第三步，用 LangChain 切分文本}
+\begin{Code}
+splitter = RecursiveCharacterTextSplitter(
+    chunk_size=config.chunk_size,
+    chunk_overlap=config.overlap,
+    add_start_index=True,
+    strip_whitespace=False,
+    separators=["\n\n", "\n", "。", "！", "？", ". ", " ", ""]
+)
+docs = splitter.create_documents([text], [meta])
+\end{Code}
+“Recursive”可以先理解为逐级尝试：优先在段落边界拆分，太长时再尝试换行、句子、空格，最后必要时按字符拆。它并不总是机械地每 800 个字符切一刀。
+
+为什么要重叠？例如“密钥的配置方法如下”位于前一段结尾，而实际说明位于后一段开头；适当重叠能减少断句丢失上下文。不过重叠不能解决所有跨段依赖。
+
+\subsection{Document 对象里装了什么}
+下面是教学示意：
+\begin{Code}
+Document(
+    page_content="LLM_API_KEY is configured in .env.",
+    metadata={
+        "source": "configuration.md",
+        "page": 0,
+        "start": 56,
+        "line_start": 4,
+        "line_end": 4,
+        "id": "..."
+    }
+)
+\end{Code}
+\code{page_content} 是原文，不是模型总结。\code{metadata} 是附加信息。普通文本用 \code{page=0} 表示不按 PDF 页定位；PDF 从第 1 页开始计数。
+
+\subsection{行号为什么能对应原文}
+切分器提供片段起点 \code{start_index}。项目会验证：
+\begin{Code}
+offset = doc.metadata.pop("start_index")
+if offset < 0 or text[offset:offset+len(doc.page_content)] != doc.page_content:
+    raise ValueError("无法准确定位文档片段，拒绝生成错误引用")
+line_start = text.count("\n", 0, offset) + 1
+\end{Code}
+\code{text[a:b]} 是从字符串中取出一段。\code{count} 统计起点之前有多少个换行，再加 1，就是起始行号。引用基于建库时的文本快照；源文件之后改变但未同步时，显示的仍是旧索引内容。
+
+\section{Embedding：为什么文字能变成数字}
+
+\subsection{先理解向量，不必先会高等数学}
+向量可以先看作一个数字列表，例如：
+\begin{Code}
+[0.12, -0.35, 0.81, ...]
+\end{Code}
+真正的语义 Embedding 模型经过训练，将文本映射到一个数值空间。通常希望含义相近的表达得到方向相近的向量，例如“如何启动网页”和“网页运行命令是什么”。每个维度通常没有容易人工命名的独立含义。
+
+Embedding 不会直接返回“答案在第 4 行”，也不是把原文加密。程序仍需要保存原文和来源，才能从向量检索结果还原出可阅读的证据。
+
+\subsection{为什么需要两个模型角色}
+\begin{longtable}{L{0.22\textwidth}L{0.32\textwidth}L{0.34\textwidth}}
+\toprule
+角色 & 输入与输出 & 用在什么时候 \\
+\midrule
+Embedding 模型 & 文本 $\rightarrow$ 数字向量 & 建库时处理片段；向量查询时处理问题 \\
+聊天模型 & 问题和资料 $\rightarrow$ 回答文本 & 生成最终答案，或者改写多轮追问 \\
+\bottomrule
+\end{longtable}
+DeepSeek 在此默认承担聊天模型角色。向量化可以由本地模型或另一个远程服务完成；不能因为有 DeepSeek 聊天 Key，就假定同一个地址也提供 Embedding API。
+
+\subsection{三种 Embedding 后端}
+\textbf{本地语义模型：}
+\begin{Code}
+return HuggingFaceEmbeddings(
+    model_name=config.embedding_model,
+    model_kwargs={"device": "cpu", "trust_remote_code": False},
+    encode_kwargs={"normalize_embeddings": True},
+    show_progress=False
+)
+\end{Code}
+第一次需要下载模型和依赖，之后模型文件可在本机运行。当前默认选择多语言 MiniLM 模型；它有自己的输入长度上限。切分的 800 字符并不保证全部都能被模型编码，长文本仍可能截断，需根据评测调整。
+
+\textbf{远程向量服务：}
+\begin{Code}
+return OpenAIEmbeddings(
+    model=config.embedding_model,
+    api_key=config.embedding_key,
+    base_url=config.embedding_url,
+    check_embedding_ctx_length=False,
+    request_timeout=config.timeout,
+    max_retries=2
+)
+\end{Code}
+类名含 OpenAI，但可配置兼容服务地址。此处关闭客户端的自动 Token 长度处理，以便直接发送文本；它没有消除服务端输入长度限制。文档片段会发送到你配置的服务，可能产生费用。
+
+\textbf{离线演示：}
+\begin{Code}
+v = np.zeros(512, dtype=np.float32)
+for word in tokenize(text):
+    pos = int.from_bytes(hashlib.sha256(word.encode()).digest()[:4], "big") % len(v)
+    v[pos] += 1
+\end{Code}
+它先抽取词项，再把词项映射到 512 个“格子”中计数。相同词项总是落入相同格子，不同词项也可能碰巧落入同一格子。
+
+\important{这个演示向量没有经过语义训练。它适合检查“文本能否入库、检索能否运行、来源能否展示”，不适合证明系统能理解同义表达。}
+
+\subsection{两个接口名称的区别}
+\code{embed_documents(texts)} 接收多个片段，返回多个向量；\code{embed_query(question)} 接收一个问题，返回一个向量。文档与问题必须使用相容的向量空间，维度相同只是必要条件，不是充分条件。
+
+\section{持久化索引与增量同步：store.py}
+
+\subsection{为什么关闭网页后不用重新建库}
+索引保存在本机 SQLite 文件中，不只是一个 Python 列表。网页默认知识库的路径示意如下：
+\begin{Code}
+.rag-data/
+  default-demo/
+    index.sqlite3
+    index.lock
+  default-live/
+    index.sqlite3
+    index.lock
+\end{Code}
+\code{index.sqlite3} 是数据库文件；\code{index.lock} 用于协调更新操作。保存索引和保存网页聊天记录是两回事，本项目聊天主要存在页面会话中，需要时应导出。
+
+\subsection{数据库的三张表}
+\begin{Code}
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY, value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS files (
+    source TEXT PRIMARY KEY, digest TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chunks (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    content TEXT NOT NULL,
+    metadata TEXT NOT NULL,
+    vector BLOB NOT NULL
+);
+\end{Code}
+\begin{itemize}
+\item \code{meta}：保存根目录、模型/分块配置、向量维度、更新时间和版本。
+\item \code{files}：保存文件路径与内容哈希，用于判断文件是否变化。
+\item \code{chunks}：保存每个片段的原文、来源信息和向量。\code{BLOB} 表示二进制数据。
+\end{itemize}
+SQLite 在这里负责存储与事务；不是 SQLite 自己提供了向量近邻算法。实际相似度计算在 \code{retrieve.py} 中完成。
+
+\subsection{SHA-256 如何判断文档变化}
+\begin{Code}
+digest = hashlib.sha256(data).hexdigest()
+current[source] = digest
+if previous.get(source) != digest:
+    changed.append(source)
+    docs.extend(chunks(data, source, self.config))
+\end{Code}
+SHA-256 将文件内容计算为固定长度摘要，可以把它理解为内容指纹。文件名一样、内容变化，摘要通常就会变化；内容相同，即使修改时间变化，也不必重新处理。哈希不是加密，也不是语义向量。
+
+完整重建时，程序把用于比较的旧文件集合视为空，从而让当前文档全部进入处理流程。普通同步则只处理新增和修改文件。
+
+删除文件通过集合差判断：
+\begin{Code}
+removed = sorted(set(old) - set(current))
+\end{Code}
+即“以前存在、现在不存在”的文件。同步后删除它们对应的旧片段，避免继续引用已移除资料。
+
+\subsection{先准备成功，再提交数据库}
+\code{update()} 的关键顺序是：
+\begin{enumerate}
+\item 获得文件锁，防止两个更新同时操作同一个库。
+\item 扫描与解析变化文档。
+\item 每批最多 32 个片段调用 Embedding，检查数量、维度、有限数值和非零向量。
+\item 向量全部准备成功后，再在数据库事务中删除旧片段、插入新片段、更新元信息。
+\end{enumerate}
+如果第 2 或第 3 步失败，此时还没替换旧索引，因此旧数据仍然存在。数据库提交中的错误会通过事务回滚。这里保护的是索引更新，不会自动撤销你对源文档做过的修改。
+
+\subsection{归一化和配置指纹}
+保存向量时使用：
+\begin{Code}
+norm = np.linalg.norm(v)
+vectors.append((v/norm).astype(np.float32).tobytes())
+\end{Code}
+\code{norm} 是向量长度。除以长度以后，向量变成单位向量，便于查询时用点积计算余弦相似度。
+
+配置指纹记录 provider、模型名、远程端点及分块参数。查询时检查当前配置与索引是否匹配。即使两个模型输出维度相同，它们的坐标含义也可能不同，因此换模型不能直接沿用旧向量。
+
+\subsection{读取快照为何重要}
+\code{snapshot()} 在一个读取事务中同时读取元信息、片段与向量。这样不会混合“更新前的片段”和“更新后的向量”。它将数据恢复为 LangChain Document 列表和 NumPy 矩阵，供本次查询使用。
+
+当前每次查询会加载并扫描库中的向量，适合中小型本地资料库。它不是百万级 ANN 搜索系统，也没有专门的服务端向量数据库集群。
+
+\section{真正的检索发生在哪里：retrieve.py}
+
+\subsection{第一条路：向量余弦相似度}
+余弦相似度比较两个向量的方向：
+\[
+\operatorname{cosine}(q,d)=\frac{q\cdot d}{\lVert q\rVert\lVert d\rVert}.
+\]
+不必记住推导，先记住：在同一模型构造的向量空间中，相似度较高通常表示更相关，但不保证包含答案。
+
+关键代码：
+\begin{Code}
+v = np.asarray(index.embeddings.embed_query(query), dtype=np.float32)
+norm = np.linalg.norm(v)
+if norm:
+    cos = matrix @ (v/norm)
+\end{Code}
+\code{matrix} 的每一行是一个已归一化的文档向量。\code{@} 是矩阵乘法，一次算出问题与所有片段的点积。若有 $N$ 个片段、每个向量 $D$ 维，矩阵形状是 $N\times D$，结果包含 $N$ 个分数。
+
+\subsection{第二条路：BM25 关键词检索}
+BM25 根据词项在文档中的出现情况、词项在整个语料中的常见程度和文档长度等因素计算相关性。精确配置名，例如 \code{LLM_API_KEY}，往往适合关键词检索。
+
+项目采用 \code{BM25Plus}，并将 \code{delta=0}：
+\begin{Code}
+corpus = [tokenize(d.page_content) or ["__empty__"] for d in docs]
+words = tokenize(query)
+lexical = BM25Plus(corpus, delta=0).get_scores(words)
+\end{Code}
+这里的 \code{tokenize} 不是大模型的 tokenizer。它是为检索写的轻量词项提取器：英文按字母、数字、下划线组成的片段提取，中文按单字和相邻双字提取。
+
+例如“启动网页”会产生“启、动、网、页、启动、动网、网页”等词项。这种做法容易上手，但也可能让常见汉字匹配过多，不能等同于高质量中文分词系统。
+
+\subsection{为什么混合检索不直接把两种分数相加}
+向量余弦和 BM25 的数值尺度不同，直接相加可能让某一方主导。RRF（Reciprocal Rank Fusion）改用排名：
+\[
+\operatorname{RRF}(d)=\sum_{r\in\mathcal{R}}\frac{1}{60+\operatorname{rank}_{r}(d)}.
+\]
+其中 $\mathcal{R}$ 表示使用的检索通道。当前实现的代码是：
+\begin{Code}
+for order in orders:
+    for rank, i in enumerate(order, 1):
+        scores[i] = scores.get(i, 0) + 1/(60+rank)
+\end{Code}
+假设 A 在向量路排第 1、关键词路排第 4，得分是 $1/61+1/64$；B 分别排第 2 和第 2，得分是 $1/62+1/62$。这表示怎样综合两路排序，不表示答案正确的概率。
+
+实现先取每路最多 \code{max(k*4, 20)} 个候选，再融合、过滤、截取前 K 个。候选池大小和最终 Top-K 不同。
+
+\subsection{阈值过滤和最终输出}
+混合模式下，一个候选只要向量分数或关键词分数达到相应阈值，就可能被保留。代码中的核心判断为：
+\begin{Code}
+(mode != "keyword" and cos[i] >= index.config.min_cosine) or
+(mode != "vector" and lexical[i] >= index.config.min_bm25)
+\end{Code}
+向量模式仅看向量门槛，关键词模式仅看关键词门槛。过滤后再按照融合排名取前 K 项。
+
+返回的 \code{hits} 包含原文、来源、位置和三种分数。\code{revision} 表示它来自哪个索引版本。\textbf{search 函数本身不会让 DeepSeek 生成答案。}
+
+\section{LangChain 究竟在项目里做了什么}
+
+LangChain 是用来组织模型应用的 Python 工具库，不是一个大模型，也不是自动拥有你资料的知识库。
+\begin{longtable}{L{0.34\textwidth}L{0.54\textwidth}}
+\toprule
+项目使用的组件 & 作用 \\
+\midrule
+\code{Document} & 统一携带正文和来源元信息 \\
+\code{RecursiveCharacterTextSplitter} & 切分文本并记录起始位置 \\
+\code{Embeddings} & 约定文档向量化与问题向量化接口 \\
+\code{ChatOpenAI} & 调用 Chat Completions 兼容接口，当前默认指向 DeepSeek \\
+\code{ChatPromptTemplate} & 组织系统消息、用户问题和上下文模板 \\
+\code{RunnableLambda} & 将普通 Python 函数包装为可组合步骤 \\
+\code{JsonOutputParser} & 将模型返回内容解析为 JSON 对象，之后仍需业务校验 \\
+\code{StrOutputParser} & 从模型回复中提取文本，用于问题改写 \\
+\bottomrule
+\end{longtable}
+
+\subsection{竖线和 invoke 怎么读}
+\begin{Code}
+chain = RunnableLambda(retrieve) | RunnableLambda(prepare) | RunnableLambda(generate)
+result = chain.invoke(question)
+\end{Code}
+这里的 \code{|} 被 LangChain 用来组合处理步骤，不是 Shell 的管道，也不是把字符串拼起来。对这条顺序链，可以用下面的教学示意理解：
+\begin{Code}
+retrieved = retrieve(question)
+prepared = prepare(retrieved)
+result = generate(prepared)
+\end{Code}
+\code{invoke} 表示执行一次这条链并等待结果。当前这条链是按顺序执行，不因为用了 Runnable 就自动并行。
+
+\subsection{这不是原 Notebook 的照搬}
+参考 Notebook 展示网页加载、Chroma、OpenAI Embedding 和聊天模型。当前项目保留索引—检索—生成思想，改成了本地多格式文档、SQLite 事务存储、混合检索、独立模型配置、引用校验与网页界面。
+因此面试时可以说使用了 LangChain 组件组织 RAG，但不能把当前存储说成 Chroma，也不能把演示哈希向量说成训练出的语义模型。
+
+\section{回答模块逐步剖析：answer.py}
+
+\subsection{总入口 RAG.ask}
+网页真正需要生成回答时调用：
+\begin{Code}
+result = RAG(index).ask(question, mode, history)
+\end{Code}
+\code{index} 提供资料和向量，\code{question} 是用户输入，\code{mode} 是检索方式，\code{history} 是可选历史。方法内部先校验问题长度，再决定是否改写问题，最后运行检索—准备—生成链。
+
+\subsection{多轮追问为什么需要改写}
+假设上一轮你问“CHUNK\_OVERLAP 是什么”，下一轮问“它的默认值呢”。只检索“它的默认值”可能定位不到具体参数。
+
+开启多轮后，代码使用最近最多 4 轮历史，并将序列化后的历史截取到最多约 6000 字符，要求模型改写为独立问题：
+\begin{Code}
+retrieval_query = (
+    rewrite | RunnableLambda(call_model) | StrOutputParser()
+).invoke(dict(history=..., question=question)).strip()
+\end{Code}
+得到的结果可能是“CHUNK\_OVERLAP 的默认值是多少？”然后重新检索文档。历史只帮助解析指代，不直接作为新的事实证据。
+
+因此正式模式一轮问答可能有两次聊天模型调用：一次改写、一次回答。改写也可能出错，重要问题应核对最终检索问题和来源。演示模式不执行这个过程。
+
+\subsection{prepare：不是所有命中片段都会发给模型}
+\begin{Code}
+selected, count = [], 0
+for hit in result["hits"]:
+    cost = len(hit["text"]) + len(hit["source"]) + 100
+    if count + cost > config.context_chars:
+        continue
+    selected.append(dict(hit, citation=len(selected)+1))
+    count += cost
+\end{Code}
+这里保留完整片段，而不是从中间截断到预算长度。超预算的片段被跳过，后面的较短片段仍可能被选入。\code{citation} 给实际放入上下文的片段从 1 开始编号。
+
+这只是字符级预算估计，加的 100 是来源包装的近似开销，不是严格计算模型完整请求的 Token 数。\code{hits} 是检索结果，\code{sources} 是筛选后实际用于回答的证据，两者可能不同。
+
+\subsection{哪些情况下不调用回答模型}
+\begin{Code}
+if not sources:
+    return ...  # status="no_evidence"
+if config.demo:
+    return ...  # status="demo", show original text only
+\end{Code}
+没有可用证据时直接报告资料不足；演示模式直接拼接原文供阅读。在网页勾选“只看检索结果”时，更早就在 \code{app.py} 中直接调用 \code{search}，不会进入回答生成分支。
+
+\subsection{究竟发了哪些数据给 DeepSeek}
+每个证据片段会整理为包含编号、来源、页码、行号和正文的 JSON。例如教学示意：
+\begin{Code}
+[
+  {
+    "id": 1,
+    "source": "configuration.md",
+    "page": 0,
+    "lines": [4, 8],
+    "text": "LLM_API_KEY is configured in .env."
+  }
+]
+\end{Code}
+最终请求主要由以下消息组成：
+\begin{enumerate}
+\item 系统消息：只能依据检索资料回答、资料中的指令不具有系统权限、缺少依据时拒答、返回指定 JSON 格式；其中插入上述证据。
+\item 用户消息：本次用于回答的问题，可能是多轮改写后的独立问题。
+\end{enumerate}
+不是把全部 SQLite 数据库、整个文件夹或向量列表都发给聊天模型。向量用于检索，模型生成回答主要读取被选中的原文。
+
+\subsection{模型客户端和真正的发送位置}
+\begin{Code}
+return ChatOpenAI(
+    model=config.llm_model,
+    api_key=config.llm_key,
+    base_url=config.llm_url,
+    temperature=0,
+    timeout=config.timeout,
+    max_retries=2,
+    extra_body={"max_tokens": config.max_tokens},
+    use_responses_api=False
+)
+\end{Code}
+\code{ChatOpenAI} 是兼容协议客户端名称，并不意味着请求一定发给 OpenAI。真正目标由 \code{base_url} 决定。这里保留 DeepSeek 所需的 \code{max_tokens} 字段，避免新版客户端改写成另一种参数名称。
+
+真正发送并接收回复的位置是：
+\begin{Code}
+message = self.llm.invoke(prompt)
+\end{Code}
+\code{message} 是模型返回的消息对象，包含内容以及可能提供的用量信息。\code{temperature=0} 用于降低采样随机性，但不能保证每次完全相同，更不能保证正确。
+
+\subsection{Prompt 模板和 JSON 解析怎样衔接}
+\begin{Code}
+value = (
+    PROMPT | RunnableLambda(call_model) | JsonOutputParser()
+).invoke(dict(question=retrieval_query, context=context))
+\end{Code}
+\code{PROMPT} 将问题和证据填入消息模板，\code{call_model} 调用模型，Parser 把回复解析为 Python 字典。模型被要求返回类似：
+\begin{Code}
+{
+  "supported": true,
+  "answer": "在应用目录的 .env 中配置。[1]",
+  "citations": [1]
+}
+\end{Code}
+JSON 使用 \code{true/false}，解析到 Python 后是 \code{True/False}。\code{supported} 是模型对资料支持程度的判断，不是外部验证器签发的正确性证明。
+
+模板中为什么有双大括号？LangChain 用 \code{{context}} 一类占位符填变量，因此要把示例 JSON 的字面大括号写成双大括号，避免被当成待填变量。
+
+\subsection{引用校验能保证什么，不能保证什么}
+程序检查回答结构、\code{supported} 类型、引用编号范围，并从正文提取 \code{[1]} 这类编号，与 \code{citations} 对照：
+\begin{Code}
+inline = {int(i) for i in re.findall(r"\[(\d+)\]", value["answer"])}
+if value["supported"] and (not ids or inline != set(ids)):
+    raise ValueError("正文引用与 citations 不一致")
+\end{Code}
+这能拦住“只有三个片段，却引用 [99]”或“正文写 [2]，列表只写 [1]”等问题。
+
+但模型仍可能引用真实的 [1]，却对 [1] 做错误解释。\textbf{当前程序检查的是结构和编号一致性，没有实现逐个结论的语义蕴含验证。} 因此阅读来源和人工评测仍然重要。
+
+\section{用一条问题追踪完整调用链}
+现在把前面的知识串起来。假设已经同步示例文档，正式配置也已完成，用户问“LLM\_API\_KEY 在哪里配置？”
+
+\begin{enumerate}
+\item \code{app.py} 的 \code{st.chat_input} 得到问题字符串。
+\item 如果未勾选“只检索”，创建 \code{RAG(index)} 并调用 \code{ask}。
+\item \code{ask} 检查输入，有必要时改写追问。
+\item \code{search} 调用 \code{index.snapshot()} 取得同一版本的片段与向量。
+\item 向量路对问题做 Embedding 并计算相似度；关键词路对问题做词项提取并计算 BM25。
+\item RRF 融合、相关性门槛过滤，返回最多 K 个候选。
+\item \code{prepare} 按字符预算选取证据并编号。
+\item \code{generate} 把证据和问题放进 Prompt，通过模型客户端发送。
+\item 模型返回 JSON，程序解析并检查引用。
+\item \code{app.py} 展示答案和来源，放入页面聊天历史，供导出或多轮追问使用。
+\end{enumerate}
+
+如果开启离线演示，第 8 步不会发送聊天请求，直接把证据原文显示出来。如果选择关键词检索，第 5 步也不会进行查询向量化。
+
+\section{Streamlit 网页代码怎么理解}
+
+\subsection{几行 Python 为什么就能变成网页}
+Streamlit 将 Python 的界面调用转换成浏览器组件。例如：
+\begin{Code}
+demo = st.toggle("离线演示（无需 API Key）", value=True)
+root = st.text_input("文档目录", str(APP/"sample_docs"))
+if st.button("同步 / 更新索引", type="primary"):
+    result = index.update(root, rebuild)
+\end{Code}
+第一行绘制开关并返回布尔值，第二行绘制输入框并返回文本，第三行在点击按钮触发的运行中返回真，随后执行建库函数。
+
+\subsection{为什么要使用 session\_state}
+Streamlit 的交互通常会触发脚本重新运行。如果把聊天记录只放在普通局部变量中，重新运行就可能丢失。因此使用：
+\begin{Code}
+st.session_state.index = Index(config)
+st.session_state.chat = []
+\end{Code}
+\code{session_state} 保存当前网页会话里的对象和聊天记录。它不是永久数据库；刷新、断开或重新建立会话可能使状态重置。索引文件是否仍在磁盘，不取决于聊天是否还显示。
+
+\subsection{identity 为什么还要做一次哈希}
+网页把模型设置、数据目录及相关连接配置组合后计算一个 identity。身份变化时，重建页面使用的 Index 对象并清空聊天，避免切换知识库后把旧聊天混进来。
+
+这与文件内容哈希用途不同：文件哈希判断文档变没变；网页 identity 判断页面当前连接的配置变没变；索引 fingerprint 则判断旧向量是否还能被当前配置使用。
+
+\subsection{来源折叠面板由谁生成}
+\code{show_sources(sources)} 循环遍历来源，用 \code{st.expander} 绘制可展开区，再用 \code{st.code} 显示原文。它不再调用模型，是对现有检索数据的可视化。
+
+\section{正式模式的完整配置与日常使用}
+
+\subsection{创建配置文件}
+下面命令只在还没有 \code{.env} 时执行；已有配置不要覆盖：
+\begin{Code}
+cd E:\code_learning\learn-cc\langchain-RAG\project-docs-rag
+Copy-Item .env.example .env
+notepad .env
+\end{Code}
+填写自己的聊天配置：
+\begin{Code}
+LLM_API_KEY=your_actual_key
+LLM_BASE_URL=https://api.deepseek.com
+LLM_MODEL=deepseek-flash
+\end{Code}
+模型名以服务商实际支持为准。Base URL 不应重复添加 \code{/chat/completions}。这里只示范占位符，不包含你的真实密钥。
+
+\subsection{选用本地 Embedding}
+\begin{Code}
+.\.venv\Scripts\python.exe -m pip install -r requirements-local.txt -c requirements.lock.txt
+\end{Code}
+配置为：
+\begin{Code}
+EMBEDDING_PROVIDER=local
+EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+\end{Code}
+本地模型首次需要下载。下载失败可能是网络问题，不应通过开启演示模式来假装已经验证了语义模型。也可以将模型名改为完整本地模型文件夹路径。
+
+本地 Embedding 不意味着整个正式问答都离线：如果聊天模型仍是远程 DeepSeek，回答阶段仍需要联网。当前没有专门的一键“本地聊天大模型”后端；若未来接本地兼容服务，需要单独部署并验证。
+
+\subsection{或者选用远程 Embedding}
+\begin{Code}
+EMBEDDING_PROVIDER=openai
+EMBEDDING_BASE_URL=https://your-embedding-provider.example/v1
+EMBEDDING_API_KEY=your_embedding_key
+EMBEDDING_MODEL=your_embedding_model_name
+\end{Code}
+示例地址是占位符，不能直接使用。填写实际支持 Embedding 的服务地址和模型名。服务名称与参数中的 \code{openai} 表示兼容协议选择，不要求一定使用 OpenAI 官方服务。
+
+\subsection{切换正式模式并建立独立索引}
+\begin{enumerate}
+\item 退出原来的网页服务，重新运行 \code{start.cmd}。
+\item 打开网页，关闭“离线演示”。
+\item 选择文档目录，点击同步索引。正式索引与演示索引分开，不会直接复用演示向量。
+\item 先问一个明确能在原文找到答案的问题，再问一个没有答案的问题。
+\item 展开原文，核对回答与引用。不要只看状态为 \code{answered}。
+\end{enumerate}
+
+\subsection{换成自己的项目资料}
+建议建立独立文件夹，只放希望入库的说明文档。比如：
+\begin{Code}
+my-project-docs/
+  README.md
+  installation.md
+  configuration.md
+  troubleshooting.md
+\end{Code}
+网页知识库名改成 \code{my_project}，文档目录改成这个文件夹。一个知识库绑定一个根目录；修改已有资料后点普通同步，更换 Embedding 或分块参数后完整重建。
+
+\subsection{数据到底保存在哪里}
+\begin{longtable}{L{0.28\textwidth}L{0.60\textwidth}}
+\toprule
+数据 & 保存位置和性质 \\
+\midrule
+原始文档 & 你选择的文档目录；上传按钮会写入这里 \\
+片段、向量、配置版本 & 对应知识库下的 \code{index.sqlite3}，本地明文存储 \\
+网页聊天 & 当前 Streamlit 会话；可主动导出 JSON \\
+模型密钥 & 应用 \code{.env} 或进程环境变量；不要放进待索引文档 \\
+本地语义模型 & 模型库自己的缓存目录，或你指定的本地模型路径 \\
+评测结果 & 命令指定的 JSON 文件，默认位于 \code{reports} \\
+\bottomrule
+\end{longtable}
+
+\section{不用网页也可以操作：命令行}
+以下命令在项目根目录执行。\code{--demo} 和 \code{--data-dir} 是全局参数，要放在子命令前。
+
+\subsection{环境检查、建库、检索、问答}
+\begin{Code}
+.\.venv\Scripts\python.exe -m rag doctor
+.\.venv\Scripts\python.exe -m rag --demo index sample_docs
+.\.venv\Scripts\python.exe -m rag --demo search "LLM_API_KEY" --mode keyword
+.\.venv\Scripts\python.exe -m rag --demo ask "如何启动网页？"
+.\.venv\Scripts\python.exe -m rag --demo status
+\end{Code}
+\code{doctor} 仅检查配置，不测试真实 API 是否可达。\code{search} 只检索，\code{ask} 在正式模式会尝试生成回答；演示模式仍只展示原文。
+
+正式配置就绪后，不加 \code{--demo}：
+\begin{Code}
+.\.venv\Scripts\python.exe -m rag index sample_docs
+.\.venv\Scripts\python.exe -m rag ask "更换向量模型后需要做什么？"
+\end{Code}
+
+\subsection{注意网页和 CLI 的默认目录不同}
+\begin{longtable}{L{0.32\textwidth}L{0.56\textwidth}}
+\toprule
+入口 & 默认数据目录 \\
+\midrule
+网页 default 演示 & \code{.rag-data/default-demo} \\
+网页 default 正式 & \code{.rag-data/default-live} \\
+CLI 演示 & \code{.rag-data/demo} \\
+CLI 正式 & \code{.rag-data/default} \\
+\bottomrule
+\end{longtable}
+这不是数据丢失，而是默认使用的目录不同。要让 CLI 查询网页已经建立的演示库，明确指定：
+\begin{Code}
+.\.venv\Scripts\python.exe -m rag --demo --data-dir .rag-data\default-demo search "LLM_API_KEY"
+\end{Code}
+
+\section{怎样测试好不好，而不只是能运行}
+
+\subsection{第一层：程序机制测试}
+\begin{Code}
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+\end{Code}
+当前交付的 24 项自动测试覆盖索引持久化、增删改同步、失败回滚、来源定位、并发同步、格式与引用检查、网页交互，以及 LangChain 客户端对接本地 HTTP 模拟服务。
+
+这些测试通过说明相应程序机制工作正常，不代表真实 DeepSeek 对所有问题都答对。模拟 API 是为了确定性验证协议和程序分支，不是真实模型能力测试。
+
+\subsection{第二层：检索评测}
+项目提供 22 道示例题：18 道有来源依据、4 道无答案题。执行：
+\begin{Code}
+.\.venv\Scripts\python.exe -m rag --demo index sample_docs
+.\.venv\Scripts\python.exe -m rag --demo evaluate --k 3 --output reports/demo-evaluation.json
+\end{Code}
+正式 Embedding 建库后，去掉 \code{--demo} 再评测。这里默认评测 Top-K 为 3，与一般问答默认 5 不同。
+
+\begin{longtable}{L{0.28\textwidth}L{0.60\textwidth}}
+\toprule
+指标 & 新手理解 \\
+\midrule
+Hit@K & 有答案的问题里，前 K 个片段是否至少命中了一个预期来源文件，再对问题求平均。 \\
+Source Recall@K & 一个问题需要 A、B 两份资料，只找到 A，则该题来源召回率为一半。 \\
+MRR@K & 首个正确来源排第 1 得 1 分，排第 2 得 1/2，排第 3 得 1/3，没命中得 0，再求平均。 \\
+无答案题空检索比例 & 无答案题有多少返回了空候选；不是最终拒答准确率。无答案问题也可能检索到相关但不足的资料。 \\
+平均耗时 & 当前机器、索引和运行状态下的处理用时；不能直接当跨硬件性能结论。 \\
+\bottomrule
+\end{longtable}
+当前评测按来源文件计分，不是片段级精确证据计分。只有 5 份短示例文档，不能用高分证明复杂真实项目检索能力强。扩展真实题集，并标注具体证据段落，才更有说服力。
+
+\subsection{第三层：答案和引用的人工检查}
+正式模式可加 \code{--answers}：
+\begin{Code}
+.\.venv\Scripts\python.exe -m rag evaluate --answers --output reports/answer-evaluation.json
+\end{Code}
+它会对三种检索模式分别生成答案，22 道题最多对应 66 次回答请求；有些题没有证据则跳过生成，重试也可能额外产生调用费用。
+
+报告的参考词覆盖率仅检查答案里有没有某些词，不理解否定、推理和事实关系。例如错误回答也可能包含“8501”。应逐题检查：
+\begin{enumerate}
+\item 答案是否真正回答了问题？
+\item 每个关键结论是否被引用原文支持？
+\item 是否漏掉了必要条件或限制？
+\item 没有资料时有没有编造？
+\item 文档更新后是否仍在引用旧事实？
+\end{enumerate}
+
+\subsection{一个适合你动手做的小实验}
+\begin{enumerate}
+\item 在独立测试目录写 \code{note.md}，内容为“测试配置 ALPHA\_PORT=9123”。
+\item 创建新知识库，同步后问“ALPHA\_PORT 是多少”。
+\item 将原文改成 9234，先不点同步，再提问，观察旧索引。
+\item 点击同步后再问，确认来源变成新内容。
+\item 删除该测试文件后同步，检查旧片段消失。
+\item 再问一个没有写进文档的信息，观察模型是否说明依据不足。
+\end{enumerate}
+这能让你亲眼看到“原文件”“持久化索引”“回答模型”是三个不同层次。
+
+\section{常见问题与排查顺序}
+
+\subsection{打不开网页}
+先确认终端真的启动了服务，而不是只在编辑器打开 \code{start.cmd}。地址使用 \url{http://127.0.0.1:8501}，不要误写成 HTTPS。若提示端口占用，可能已有一个实例，不要不断重复启动。
+
+可以在 PowerShell 检查：
+\begin{Code}
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8501/_stcore/health
+\end{Code}
+HTTP 200 只说明服务响应健康检查，不证明建库目录可写、Embedding 能加载或回答模型可用；还要实际执行建库与查询。
+
+\subsection{WinError 5：拒绝访问 .rag-data}
+这个错误表示程序无法访问或创建索引数据目录，与是否填写 API Key 没有直接关系。之前遇到的实例是受限环境启动的服务无法写入项目目录。
+
+应检查服务启动环境与用户权限，在自己正常的 PowerShell 终端运行脚本，并确认项目目录可写。不要把“关闭离线模式”“更换 Key”当成修复目录权限的方法，也不应默认把整个磁盘权限放开。
+
+\subsection{明明有文件，却提示尚未建立索引}
+查看是否只上传了文件，没有点击保存和同步；再检查知识库名称、演示开关和数据目录是否一致。CLI 与网页默认目录不同，也是常见原因。
+
+\subsection{一直在下载模型或报找不到依赖}
+基础安装不包含本地语义模型的所有依赖，需要单独安装 \code{requirements-local.txt}。首次模型下载需要网络；之后是否能离线加载，取决于模型文件是否已完整保存。
+
+\subsection{401、404、429}
+401 通常检查密钥；404 检查 Base URL、路径和模型名；429 通常与限流或配额有关。先确认报错来自聊天服务还是 Embedding 服务。修改配置后重启，并检查环境变量是否覆盖了文件值。
+
+\subsection{为什么回答错了，要从哪里查}
+按数据流排查比反复修改提示词有效：
+\begin{enumerate}
+\item 原文里有没有正确答案？没有则先补资料。
+\item 同步是否成功？索引是否仍是旧版本？
+\item 检索面板有没有找到正确片段？没有则检查切分、关键词、模型和阈值。
+\item 正确片段是否因上下文预算而被跳过？
+\item 证据已经正确提供，模型却解释错误？此时再分析提示词、模型能力和回答验证。
+\end{enumerate}
+“把 Top-K 调大”或“把门槛调低”不是永远正确的解决方法：召回可能更多，但噪声也可能更多，必须重新评测。
+
+\section{当前系统的边界与可扩展方向}
+
+\subsection{已实现的能力}
+本地 MD/TXT/文本 PDF 导入，带来源的分块，独立 Embedding 与聊天模型配置，持久化索引，增量同步，向量/关键词/混合检索，引用格式检查，多轮问题改写，网页与 CLI，自动测试和基础评测。
+
+\subsection{目前没有实现的能力}
+OCR、Word/Excel 专用解析、联网搜索、训练或微调模型、reranker 重排序模型、复杂表格理解、多人账户权限、数据库加密、百万级 ANN 向量检索、逐条结论语义核验、全局费用硬预算。
+
+此外，文档里的提示注入主要通过 Prompt 约束来防范，不能承诺完全有效。默认是本机单用户应用，不应不加鉴权就直接暴露公网。
+
+\subsection{下一步怎样改进更有价值}
+\begin{enumerate}
+\item 扩充真实项目文档和人工标注问题集，先建立可重复的基线。
+\item 比较不同 chunk 大小、重叠、Top-K 与检索阈值，而不是只凭感觉调参。
+\item 对 Markdown 按标题层级或对代码按函数结构切分，改善上下文完整性。
+\item 增加 reranker 对候选进行更精细排序，测量质量收益与额外延迟。
+\item 文档规模显著增加后，再考虑专用向量数据库或 ANN 索引。
+\item 加入版本过滤、权限隔离、片段级证据评测等更接近真实业务的能力。
+\end{enumerate}
+
+\section{学习与面试自查}
+建议你能用自己的话回答下面问题，再把项目写成“熟悉 RAG”的经历。
+\begin{enumerate}
+\item RAG 和微调有什么区别？为什么本项目不训练 DeepSeek？
+\item 文档向量化和模型生成分别发生在什么时候？
+\item 为什么上传后还要点击同步？为什么源文件改了，答案可能仍旧？
+\item 为什么要分块和保留来源？重叠会带来什么代价？
+\item 为什么要用 BM25 与向量混合？RRF 为什么用排名而不是直接加分数？
+\item 为什么同样 384 维的两个模型向量也不能随便混用？
+\item 怎样处理 Embedding 失败，避免旧索引被破坏？
+\item 为什么引用 [1] 合法，也不能证明答案准确？
+\item 你用了 LangChain 的哪些组件，哪些逻辑是自己组织的？
+\item 离线模式、只检索模式、本地 Embedding 各有什么区别？
+\end{enumerate}
+
+可以用下面这段话概括当前项目，但不要把未做过的真实模型质量测试说成已完成：
+
+\begin{quote}
+我实现了一个基于 LangChain 的项目文档 RAG 系统。文档经解析和分块后，保存原文、来源和向量；通过内容哈希完成增量同步，并用事务避免失败更新破坏旧索引。问答时结合向量和 BM25 检索，以 RRF 融合排名，将选中证据交给 DeepSeek，返回带来源的答案。系统包含引用格式检查、网页界面、自动测试和检索评测；实际回答正确性还需要结合真实模型与人工证据标注评估。
+\end{quote}
+
+\appendix
+\section{一页操作速查}
+\begin{Code}
+# Run the web app (PowerShell, project directory)
+.\start.cmd
+
+# Browser address
+http://127.0.0.1:8501
+
+# Check configuration without network requests
+.\.venv\Scripts\python.exe -m rag doctor
+
+# Offline indexing and keyword retrieval
+.\.venv\Scripts\python.exe -m rag --demo index sample_docs
+.\.venv\Scripts\python.exe -m rag --demo search "LLM_API_KEY" --mode keyword
+
+# Real indexing and answering, after configuring models
+.\.venv\Scripts\python.exe -m rag index sample_docs
+.\.venv\Scripts\python.exe -m rag ask "如何启动项目？"
+
+# Rebuild after changing embedding or chunking configuration
+.\.venv\Scripts\python.exe -m rag index sample_docs --rebuild
+
+# Regression tests
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+
+# Retrieval evaluation
+.\.venv\Scripts\python.exe -m rag evaluate --k 3 --output reports/evaluation.json
+\end{Code}
+退出服务：在启动终端按 Ctrl+C。网页中的“清空聊天”不会退出服务，也不会删除索引。
+
+\section{继续阅读的项目文件与资料}
+\begin{itemize}
+\item \code{README.md}：安装、参数、架构和排错说明。
+\item \code{MANUAL_TESTS.md}：重要功能手动验收清单。
+\item \code{VALIDATION.md}：交付时测试范围和未验证部分。
+\item \code{evaluation/questions.jsonl}：逐行 JSON 格式的问题集，可仿照扩充。
+\item \code{tests/test_rag.py}、\code{tests/test_cli.py}、\code{tests/test_ui.py}：从可复现测试理解行为边界。
+\item 原学习仓库：\url{https://github.com/langchain-ai/rag-from-scratch}。
+\end{itemize}
+本文是当前实现的学习解读，不会随代码更新自动变化。将来修改模型配置、数据目录或检索流程后，应同步修订相应章节。
+
+\end{document}
